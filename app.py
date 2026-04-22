@@ -3,21 +3,20 @@ from bs4 import BeautifulSoup
 import re
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import threading
 import time
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
 
 # إعداد نظام التسجيل
 logging.basicConfig(level=logging.INFO)
 
-# إعداد Flask
 app = Flask(__name__)
 
 # ========== إعدادات تيليجرام ==========
-BOT_TOKEN = os.environ.get("BOT_TOKEN")  # سيتم إدخاله من لوحة التحكم
-CHANNEL_ID = os.environ.get("CHANNEL_ID")  # سيتم إدخاله من لوحة التحكم
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHANNEL_ID = os.environ.get("CHANNEL_ID")
 # ====================================
 
 URL = "https://sp-today.com/currency/us-dollar"
@@ -56,6 +55,7 @@ def get_usd_prices():
         
         page_text = soup.get_text()
         
+        # أنماط البحث
         buy_pattern = r'شراء\s*([\d,]+)\s*ل\.س'
         sell_pattern = r'بيع\s*([\d,]+)\s*ل\.س'
         
@@ -65,16 +65,23 @@ def get_usd_prices():
         if buy_match and sell_match:
             buy_price = int(buy_match.group(1).replace(',', ''))
             sell_price = int(sell_match.group(1).replace(',', ''))
+            logging.info(f"✅ تم جلب الأسعار - شراء: {buy_price}, بيع: {sell_price}")
             return buy_price, sell_price
-        return None, None
+        else:
+            logging.warning("⚠️ لم يتم العثور على الأسعار في الصفحة")
+            return None, None
         
     except Exception as e:
-        logging.error(f"خطأ في الجلب: {e}")
+        logging.error(f"❌ خطأ في الجلب: {e}")
         return None, None
 
 def send_to_channel(buy_price, sell_price):
-    if not BOT_TOKEN or BOT_TOKEN.startswith("توكن"):
-        logging.warning("يرجى إعداد توكن البوت")
+    if not BOT_TOKEN or not CHANNEL_ID:
+        logging.error("❌ BOT_TOKEN أو CHANNEL_ID غير مضبوط")
+        return False
+    
+    if BOT_TOKEN.startswith("توكن"):
+        logging.error("❌ يرجى تعديل BOT_TOKEN في متغيرات البيئة")
         return False
     
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -91,7 +98,7 @@ def send_to_channel(buy_price, sell_price):
 
 🕐 **آخر تحديث:** {timestamp}
 
-_📢 يتم إرسال التحديث كل ساعة_
+_📢 تحديث كل ساعة_
 """
     
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -104,62 +111,77 @@ _📢 يتم إرسال التحديث كل ساعة_
     
     try:
         response = requests.post(url, json=data, timeout=10)
-        return response.ok
+        if response.ok:
+            logging.info("✅ تم الإرسال إلى القناة بنجاح")
+            return True
+        else:
+            logging.error(f"❌ خطأ من تيليجرام: {response.text}")
+            return False
     except Exception as e:
-        logging.error(f"خطأ في الإرسال: {e}")
+        logging.error(f"❌ خطأ في الإرسال: {e}")
         return False
 
 def send_price_update():
     """إرسال تحديث السعر"""
-    logging.info("🔄 جلب سعر الدولار...")
+    logging.info("🔄 بدء جلب سعر الدولار...")
     
     current_buy, current_sell = get_usd_prices()
     
     if not current_buy or not current_sell:
-        logging.error("فشل في جلب الأسعار")
+        logging.error("❌ فشل في جلب الأسعار")
         return
     
-    last_buy, last_sell = load_last_price()
+    logging.info(f"📊 السعر الحالي: شراء {current_buy:,} | بيع {current_sell:,}")
     
-    # إرسال التحديث (دائماً)
     if send_to_channel(current_buy, current_sell):
         save_current_price(current_buy, current_sell)
-        logging.info("✅ تم إرسال التحديث")
+        logging.info("✅ تم تحديث الأسعار وإرسالها بنجاح")
     else:
         logging.error("❌ فشل الإرسال")
 
 def scheduler_worker():
     """تشغيل المهام في الخلفية"""
+    logging.info("🚀 بدء جدولة المهام - سيتم الإرسال كل ساعة")
+    
     while True:
-        # انتظر حتى بداية الساعة التالية
         now = datetime.now()
-        next_hour = now.replace(minute=0, second=0, microsecond=0)
-        if now.minute == 0 and now.second == 0:
-            # بداية الساعة - أرسل التحديث فوراً
-            send_price_update()
-            time.sleep(60)  # انتظر دقيقة لتجنب الإرسال المتكرر
-        else:
-            # احسب الوقت المتبقي حتى الساعة التالية
-            wait_seconds = (next_hour + timedelta(hours=1) - now).total_seconds()
-            time.sleep(wait_seconds)
+        
+        # احسب الوقت حتى بداية الساعة القادمة
+        next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        wait_seconds = (next_hour - now).total_seconds()
+        
+        logging.info(f"⏰ انتظار {wait_seconds/60:.0f} دقيقة حتى الساعة {next_hour.strftime('%H:%M')}")
+        time.sleep(wait_seconds)
+        
+        # أرسل التحديث
+        logging.info(f"🕐 الساعة {datetime.now().strftime('%H:%M')} - جاري الإرسال...")
+        send_price_update()
 
-# نقطة الصحة - ضروري ليبقى البوت نشطاً على Render
 @app.route('/')
 def home():
-    return jsonify({"status": "Bot is running", "time": datetime.now().isoformat()})
+    return jsonify({
+        "status": "Bot is running",
+        "time": datetime.now().isoformat(),
+        "next_send": (datetime.now().replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)).isoformat()
+    })
 
 @app.route('/health')
 def health():
     return jsonify({"status": "healthy", "time": datetime.now().isoformat()})
+
+@app.route('/test')
+def test():
+    """مسار لاختبار الإرسال يدوياً"""
+    send_price_update()
+    return jsonify({"message": "Test sent! Check your channel and logs."})
 
 # بدء تشغيل البوت
 def start_bot():
     # بدء جدولة الإرسال في خلفية منفصلة
     thread = threading.Thread(target=scheduler_worker, daemon=True)
     thread.start()
-    logging.info("🚀 تم بدء البوت - سيتم الإرسال كل ساعة")
+    logging.info("🚀 تم بدء البوت")
 
-# تشغيل Flask مع بدء البوت
 if __name__ == "__main__":
     start_bot()
     port = int(os.environ.get("PORT", 5000))
